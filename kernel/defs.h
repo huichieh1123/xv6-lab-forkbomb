@@ -82,6 +82,7 @@ void            panic(char*) __attribute__((noreturn));
 void            printfinit(void);
 
 // proc.c
+int             wait_noblock(uint64);
 int             cpuid(void);
 void            exit(int);
 int             fork(void);

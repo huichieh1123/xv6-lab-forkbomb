@@ -124,8 +124,7 @@ runcmd(struct cmd *cmd)
 
   case BACK:
     bcmd = (struct backcmd*)cmd;
-    if(fork1() == 0)
-      runcmd(bcmd->cmd);
+    runcmd(bcmd->cmd);
     break;
   }
   exit(0);
@@ -165,9 +164,16 @@ main(void)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
     }
-    if(fork1() == 0)
+    int pid = fork1();
+    if (pid == 0)
       runcmd(parsecmd(buf));
-    wait(0);
+    else {
+      int status, done_pid;
+      while ((done_pid = wait_noblock(&status)) > 0)
+      printf("[bg %d] exited with status %d\n", done_pid, status);
+      if (parsecmd(buf)->type == BACK)
+        printf("[%d]\n", pid);
+    }
   }
   exit(0);
 }
