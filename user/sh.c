@@ -3,6 +3,7 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/param.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -53,6 +54,8 @@ int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
 void runcmd(struct cmd*) __attribute__((noreturn));
+
+int jobs[NPROC] = {0};
 
 // Execute cmd.  Never returns.
 void
@@ -127,6 +130,13 @@ runcmd(struct cmd *cmd)
     runcmd(bcmd->cmd);
     break;
   }
+  int status, done_pid;
+  while ((done_pid = wait_noblock(&status)) > 0) {
+    printf("[bg %d] exited with status %d\n", done_pid, status);
+    for(int i=0;i<NPROC;i++)
+      if(jobs[i]==done_pid)
+          jobs[i]=0;
+  }
   exit(0);
 }
 
@@ -142,7 +152,7 @@ getcmd(char *buf, int nbuf)
 }
 
 int
-main(void)
+main(int argc, char* argv[])
 {
   static char buf[100];
   int fd;
@@ -155,8 +165,27 @@ main(void)
     }
   }
 
+  if(argc > 1){
+      fd = open(argv[1], O_RDONLY);
+      if(fd < 0){
+          fprintf(2, "sh: cannot open %s\n", argv[1]);
+          exit(1);
+      }
+      close(0);
+      dup(fd);
+      close(fd);
+  }
+
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){
+    int status, done_pid;
+    while ((done_pid = wait_noblock(&status)) > 0) {
+      printf("[bg %d] exited with status %d\n", done_pid, status);
+      for(int i=0;i<NPROC;i++)
+        if(jobs[i]==done_pid)
+            jobs[i]=0;
+    }
+      
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
@@ -164,15 +193,44 @@ main(void)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
     }
+
+    if (buf[0] == 'j' && buf[1] == 'o' && buf[2] == 'b' && buf[3] == 's') {
+      buf[strlen(buf)-1] = 0;
+      for(int i=0;i<NPROC;i++){
+            if(jobs[i]!=0)
+                printf("%d\n", jobs[i]);
+      }
+      continue;
+    }
+
+    struct cmd *parsed = parsecmd(buf);
     int pid = fork1();
-    if (pid == 0)
-      runcmd(parsecmd(buf));
-    else {
-      int status, done_pid;
-      while ((done_pid = wait_noblock(&status)) > 0)
-      printf("[bg %d] exited with status %d\n", done_pid, status);
-      if (parsecmd(buf)->type == BACK)
-        printf("[%d]\n", pid);
+    if(pid == 0)
+      runcmd(parsed);
+    // parent
+    if(parsed->type == BACK) {
+      printf("[%d]\n", pid);
+      for(int i=0;i<NPROC;i++){
+        if(jobs[i]==0){
+            jobs[i]=pid;
+            break;
+        }
+      }
+      sleep(1);
+      while ((done_pid = wait_noblock(&status)) > 0) {
+        printf("[bg %d] exited with status %d\n", done_pid, status);
+        for(int i=0;i<NPROC;i++)
+          if(jobs[i]==done_pid)
+              jobs[i]=0;
+      }
+    } else {
+      wait(0);
+      while ((done_pid = wait_noblock(&status)) > 0) {
+        printf("[bg %d] exited with status %d\n", done_pid, status);
+        for(int i=0;i<NPROC;i++)
+          if(jobs[i]==done_pid)
+              jobs[i]=0;
+      }
     }
   }
   exit(0);
