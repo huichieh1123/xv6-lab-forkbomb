@@ -142,7 +142,7 @@ runcmd(struct cmd *cmd)
     runcmd(lcmd->right);
     break;
 
-case PIPE:
+  case PIPE:
     pcmd = (struct pipecmd*)cmd;
     pipe(p);
     
@@ -159,7 +159,7 @@ case PIPE:
     }
 
     close(p[0]); close(p[1]);
-    wait(0); wait(0);
+    wait(0); wait(0); // foreground/background 都不在這裡管
     break;
 
 
