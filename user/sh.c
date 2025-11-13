@@ -57,6 +57,47 @@ void runcmd(struct cmd*) __attribute__((noreturn));
 
 int jobs[NPROC] = {0};
 
+// utility: reap all finished background children
+void reap_bg() {
+    int status, done_pid;
+    while ((done_pid = wait_noblock(&status)) > 0) {
+        fprintf(2, "[bg %d] exited with status %d\n", done_pid, status);
+        for(int i = 0; i < NPROC; i++)
+            if(jobs[i] == done_pid)
+                jobs[i] = 0;
+    }
+}
+
+void add_job(int pid) {
+  for(int i = 0; i < NPROC; i++){
+    if(jobs[i] == 0){
+      jobs[i] = pid;
+      break;
+    }
+  }
+}
+
+void wait_foreground(int pid) {
+    int status, done_pid;
+
+    for(;;) {
+        while ((done_pid = wait_noblock(&status)) > 0) {
+            if (done_pid == pid) {
+                // 前景行程結束
+                return;
+            } else {
+                // 回收其他背景 zombie
+                fprintf(2, "[bg %d] exited with status %d\n", done_pid, status);
+                for (int i = 0; i < NPROC; i++)
+                    if (jobs[i] == done_pid)
+                        jobs[i] = 0;
+            }
+        }
+        sleep(1);
+    }
+}
+
+
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)
@@ -101,93 +142,107 @@ runcmd(struct cmd *cmd)
     runcmd(lcmd->right);
     break;
 
-  case PIPE:
+case PIPE:
     pcmd = (struct pipecmd*)cmd;
-    if(pipe(p) < 0)
-      panic("pipe");
-    if(fork1() == 0){
-      close(1);
-      dup(p[1]);
-      close(p[0]);
-      close(p[1]);
-      runcmd(pcmd->left);
+    pipe(p);
+    
+    int pid_left = fork1();
+    if(pid_left==0){
+        close(1); dup(p[1]); close(p[0]); close(p[1]);
+        runcmd(pcmd->left); exit(0);
     }
-    if(fork1() == 0){
-      close(0);
-      dup(p[0]);
-      close(p[0]);
-      close(p[1]);
-      runcmd(pcmd->right);
+
+    int pid_right = fork1();
+    if(pid_right==0){
+        close(0); dup(p[0]); close(p[0]); close(p[1]);
+        runcmd(pcmd->right); exit(0);
     }
-    close(p[0]);
-    close(p[1]);
-    wait(0);
-    wait(0);
+
+    close(p[0]); close(p[1]);
+    wait(0); wait(0);
     break;
+
+
 
   case BACK:
     bcmd = (struct backcmd*)cmd;
     runcmd(bcmd->cmd);
     break;
   }
-  int status, done_pid;
-  while ((done_pid = wait_noblock(&status)) > 0) {
-    printf("[bg %d] exited with status %d\n", done_pid, status);
-    for(int i=0;i<NPROC;i++)
-      if(jobs[i]==done_pid)
-          jobs[i]=0;
-  }
+
   exit(0);
 }
 
 int
-getcmd(char *buf, int nbuf)
+getcmd(char *buf, int nbuf, int fd)
 {
-  write(2, "$ ", 2);
+  // if(fd == 0) {
+  //  // Interactive mode
+  //  fprintf(2, "$ ");
+  // }
+  
   memset(buf, 0, nbuf);
-  gets(buf, nbuf);
-  if(buf[0] == 0) // EOF
+  
+  // Read a line from fd
+  char *p = buf;
+  int i = 0;
+  while(i < nbuf - 1) {
+    if(read(fd, p, 1) != 1) {
+      if (i == 0) // EOF or error
+        return -1;
+      break; // End of input
+    }
+    if(*p == '\n')
+      break;
+    p++;
+    i++;
+  }
+  *p = '\0'; // Null-terminate
+
+  if(buf[0] == 0) // Handle empty input or EOF
     return -1;
+
   return 0;
 }
 
-// utility: reap all finished background children
-void reap_bg() {
-    int status, done_pid;
-    while ((done_pid = wait_noblock(&status)) > 0) {
-        fprintf(2, "[bg %d] exited with status %d\n", done_pid, status);
-        for(int i = 0; i < NPROC; i++)
-            if(jobs[i] == done_pid)
-                jobs[i] = 0;
-    }
-}
+
 
 int main(int argc, char* argv[]) {
     static char buf[100];
     int fd;
 
     // Ensure that three file descriptors are open.
-    while((fd = open("console", O_RDWR)) >= 0){
-        if(fd >= 3){
-            close(fd);
-            break;
-        }
-    }
+    // while((fd = open("console", O_RDWR)) >= 0){
+    //     if(fd >= 3){
+    //         close(fd);
+    //         break;
+    //     }
+    // }
 
     if(argc > 1){
-        fd = open(argv[1], O_RDONLY);
-        if(fd < 0){
-            fprintf(2, "sh: cannot open %s\n", argv[1]);
-            exit(1);
-        }
-        close(0);
-        dup(fd);
-        close(fd);
+      // Run from script
+      if((fd = open(argv[1], O_RDONLY)) < 0){
+        fprintf(2, "sh: cannot open %s\n", argv[1]);
+        exit(1);
+      }
+    } else {
+      // Interactive mode
+      fd = 0;
     }
 
     // Read and run input commands.
-    while(getcmd(buf, sizeof(buf)) >= 0){
-        reap_bg(); // 每次輸入命令前先回收背景 child
+    while(1){
+        reap_bg();
+        if (fd == 0)
+          fprintf(2, "$ ");
+          
+        if(getcmd(buf, sizeof(buf), fd )< 0){
+            break; // EOF
+        }
+        if(buf[0] == '\n' || buf[0] == 0) // Empty line
+          continue;
+
+        reap_bg();
 
         if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
             buf[strlen(buf)-1] = 0;  // chop \n
@@ -208,26 +263,19 @@ int main(int argc, char* argv[]) {
         int pid = fork1();
         if(pid == 0){
             runcmd(parsed);
-            exit(0); // 防止 child 退到 shell
+            break;
         }
 
         // parent
-        if(parsed->type == BACK){
+        if (parsed->type == BACK) {
             printf("[%d]\n", pid);
-            // 放入 jobs[]
-            for(int i = 0; i < NPROC; i++){
-                if(jobs[i] == 0){
-                    jobs[i] = pid;
-                    break;
-                }
-            }
+            add_job(pid);
             sleep(1);
             reap_bg();
         } else {
-            // foreground: wait until done
-            wait(0);
-            reap_bg(); // 同時也回收已完成的背景 child
+            wait_foreground(pid);
         }
+        reap_bg(); // 統一在每次 command 結尾回收 zombie
     }
     exit(0);
 }
